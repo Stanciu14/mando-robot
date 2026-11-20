@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#1e3250">
+<title>Mando robot EM1035</title>
+<style>
+  :root { --azul:#1e3250; --gris:#e9edf2; --verde:#2ca02c; --rojo:#d62728; }
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, Roboto, Arial, sans-serif; background: #f6f7f9; color: #222; touch-action: none; }
+  header { height: 56px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--azul); color: #fff; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  .btn { border: 0; border-radius: 10px; padding: 10px 14px; font-size: 15px; font-weight: 600; }
+  #conectar { background: #ffd23f; color: #222; }
+  #estado { font-size: 13px; opacity: .9; }
+  main { height: calc(100% - 56px); display: grid; grid-template-columns: 1fr 220px 1fr; align-items: center; justify-items: center; padding: 8px; }
+  .palanca { position: relative; width: 120px; height: min(78vh, 330px); background: var(--gris); border-radius: 60px; border: 3px solid #c9d0d8; touch-action: none; }
+  .palanca::after { content: ""; position: absolute; left: 12px; right: 12px; top: 50%; height: 2px; background: #b7c0ca; }
+  .pomo { position: absolute; left: 50%; top: 50%; width: 96px; height: 96px; margin: -48px 0 0 -48px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #5b7fb0, var(--azul)); box-shadow: 0 4px 10px rgba(0,0,0,.3); }
+  .etq { text-align: center; font-weight: 700; margin-top: 6px; }
+  .valor { text-align: center; font-size: 13px; color: #555; }
+  .centro { display: flex; flex-direction: column; gap: 14px; align-items: stretch; width: 200px; }
+  #stop { background: var(--rojo); color: #fff; font-size: 22px; padding: 22px 0; border-radius: 16px; }
+  .interruptor { display: flex; align-items: center; justify-content: space-between; background: #fff; border-radius: 12px; padding: 12px; border: 2px solid #d5dbe2; }
+  .switch { width: 62px; height: 34px; border-radius: 17px; background: #c9d0d8; position: relative; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 28px; height: 28px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch.on { background: var(--verde); }
+  .switch.on::after { left: 31px; }
+  #retraso { background: #fff; border-radius: 12px; padding: 10px; border: 2px solid #d5dbe2; font-size: 13px; text-align: center; }
+  #retraso b { font-size: 20px; display: block; }
+  #aviso { position: fixed; inset: 56px 0 0 0; background: rgba(246,247,249,.97); display: none; padding: 24px; font-size: 16px; line-height: 1.5; }
+  @media (orientation: portrait) { main { grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr; } .centro { grid-column: 1 / 3; width: 100%; flex-direction: row; flex-wrap: wrap; } .centro > * { flex: 1 1 45%; } .palanca { height: 52vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Robot EM1035 · Equipo 2</h1>
+  <span id="estado">Desconectado</span>
+  <button class="btn" id="conectar">Conectar</button>
+</header>
+<main>
+  <div>
+    <div class="palanca" id="palIzq"><div class="pomo"></div></div>
+    <div class="etq">IZQUIERDA</div><div class="valor" id="valIzq">0</div>
+  </div>
+  <div class="centro">
+    <button class="btn" id="stop">STOP</button>
+    <div class="interruptor" id="estab"><span><b>Estabilizador</b><br><small id="estabTxt">apagado</small></span><div class="switch" id="sw"></div></div>
+    <div id="retraso">Retraso (ida)<b id="ms">–</b><span id="msDet">conecta para medir</span></div>
+  </div>
+  <div>
+    <div class="palanca" id="palDer"><div class="pomo"></div></div>
+    <div class="etq">DERECHA</div><div class="valor" id="valDer">0</div>
+  </div>
+</main>
+<div id="aviso"></div>
+
+<script>
+// ---- Bluetooth (módulo AT-09 / HM-10: servicio FFE0, característica FFE1) ----
+let car = null, disp = null, ocupado = false;
+let izq = 0, der = 0, estab = false;
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = id => document.getElementById(id);
+
+function estado(t, ok) { $("estado").textContent = t; $("conectar").textContent = ok ? "Desconectar" : "Conectar"; }
+
+async function enviar(txt) {
+  if (!car) return false;
+  if (ocupado) return false;             // no acumular mensajes: así no crece el retraso
+  ocupado = true;
+  try {
+    const datos = enc.encode(txt);
+    if (car.writeValueWithoutResponse) await car.writeValueWithoutResponse(datos);
+    else await car.writeValue(datos);
+    return true;
+  } catch (e) { return false; }
+  finally { ocupado = false; }
+}
+
+async function conectar() {
+  if (disp && disp.gatt.connected) { disp.gatt.disconnect(); return; }
+  if (!navigator.bluetooth) {
+    $("aviso").style.display = "block";
+    $("aviso").innerHTML = "<b>Este navegador no permite Bluetooth.</b><br>Abre esta página en <b>Google Chrome</b> en Android, desde su dirección https (no desde un archivo descargado). Activa el Bluetooth y la ubicación del móvil.";
+    return;
+  }
+  try {
+    estado("Buscando…", false);
+    disp = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [0xFFE0] });
+    disp.addEventListener("gattserverdisconnected", () => { car = null; estado("Desconectado", false); });
+    estado("Conectando…", false);
+    const srv = await (await disp.gatt.connect()).getPrimaryService(0xFFE0);
+    car = await srv.getCharacteristic(0xFFE1);
+    try { await car.startNotifications(); car.addEventListener("characteristicvaluechanged", recibir); } catch (e) {}
+    estado("Conectado: " + (disp.name || "módulo"), true);
+    enviar(estab ? "N1*" : "N0*");
+  } catch (e) {
+    estado("No conectado", false);
+    $("aviso").style.display = "block";
+    $("aviso").innerHTML = "<b>No se pudo conectar.</b><br>" + e.message + "<br><br>Comprueba que el robot está encendido, que ningún otro móvil está conectado al módulo y que en la lista eliges el módulo (BT05 o el nombre que le pusiste). Toca aquí para cerrar.";
+  }
+}
+$("aviso").onclick = () => $("aviso").style.display = "none";
+$("conectar").onclick = conectar;
+
+// ---- Medida del retraso: el Arduino devuelve "P<n>" ----
+let pingN = 0, pingT = {}, rx = "", medidas = [];
+function recibir(ev) {
+  rx += dec.decode(ev.target.value);
+  let i;
+  while ((i = rx.indexOf("\n")) >= 0) {
+    const linea = rx.slice(0, i).trim(); rx = rx.slice(i + 1);
+    const m = linea.match(/^P(\d+)$/);
+    if (m && pingT[m[1]]) {
+      const ida = (performance.now() - pingT[m[1]]) / 2; delete pingT[m[1]];
+      medidas.push(ida); if (medidas.length > 10) medidas.shift();
+      const media = medidas.reduce((a, b) => a + b, 0) / medidas.length;
+      $("ms").textContent = Math.round(ida) + " ms";
+      $("ms").style.color = media < 100 ? "#2ca02c" : "#d62728";
+      $("msDet").textContent = "media " + Math.round(media) + " ms · límite 100 ms";
+    }
+  }
+}
+setInterval(async () => {
+  if (!car) return;
+  pingN = (pingN + 1) % 1000;
+  pingT[pingN] = performance.now();
+  if (!(await enviar("P" + pingN + "*"))) delete pingT[pingN];
+}, 2000);
+
+// ---- Envío de las palancas: 20 veces por segundo ----
+setInterval(() => { if (car) enviar("L" + izq + ",R" + der + "*"); }, 50);
+
+// ---- Palancas que vuelven solas al centro (funcionan las dos a la vez) ----
+function palanca(idPal, idVal, set) {
+  const pal = $(idPal), pomo = pal.querySelector(".pomo");
+  let dedo = null;
+  function mover(y) {
+    const r = pal.getBoundingClientRect();
+    const rango = r.height / 2 - 48;
+    let d = Math.max(-rango, Math.min(rango, y - (r.top + r.height / 2)));
+    pomo.style.transform = "translateY(" + d + "px)";
+    const v = Math.round(-d / rango * 100);
+    set(v); $(idVal).textContent = v;
+  }
+  function soltar() { dedo = null; pomo.style.transform = ""; set(0); $(idVal).textContent = 0; }
+  pal.addEventListener("pointerdown", e => { dedo = e.pointerId; pal.setPointerCapture(dedo); mover(e.clientY); });
+  pal.addEventListener("pointermove", e => { if (e.pointerId === dedo) mover(e.clientY); });
+  pal.addEventListener("pointerup", e => { if (e.pointerId === dedo) soltar(); });
+  pal.addEventListener("pointercancel", e => { if (e.pointerId === dedo) soltar(); });
+}
+palanca("palIzq", "valIzq", v => izq = v);
+palanca("palDer", "valDer", v => der = v);
+
+// ---- STOP y estabilizador ----
+$("stop").onclick = () => { izq = 0; der = 0; enviar("S*"); };
+$("estab").onclick = () => {
+  estab = !estab;
+  $("sw").classList.toggle("on", estab);
+  $("estabTxt").textContent = estab ? "encendido" : "apagado";
+  const msg = estab ? "N1*" : "N0*";
+  const reintentar = () => enviar(msg).then(ok => { if (!ok && car) setTimeout(reintentar, 30); });
+  reintentar();
+};
+</script>
+</body>
+</html>
